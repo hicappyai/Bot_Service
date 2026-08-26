@@ -15,35 +15,60 @@ You can explore our platform repositories for additional tools and integrations:
 
 ---
 
-## 📚 Documentation
+## 🧠 System Architecture
 
-Detailed technical specifications and architecture docs are available in the repository:
+The Bot Service is a high-performance, containerized microservice that joins Google Meet calls autonomously, streams real-time audio, and powers sub-500ms conversational AI voice interactions.
 
-- 🏗️ **[SDE Technical Specification & Architecture](./TECHNICAL_DOCUMENTATION.md)** — Comprehensive SDE guide covering Database Design, ER Diagrams, API Contracts, AWS/Docker Deployment, and Subsystem Architecture.
-- 🎙️ **[Voice AI & Bot Architecture](./VOICE_BOT_ARCHITECTURE.md)** — Deep-dive into Pipecat, WebSocket STT/TTS, Silero VAD/AEC, thread resilience, and sub-500ms latency budgets.
-- 🌐 **[Online Documentation Portal](https://hicapy.ai/docs/google-bot)** — Official online documentation portal.
+### High-Level Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Control Panel / FastAPI Backend                        │
+│             POST /api/bots/{id}/start  ──▶  SessionManager                  │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │ Docker Launch / API Command
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Bot Service Execution Container                        │
+│                                                                             │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │                      Linux Xvfb Display (:99)                       │   │
+│   │   Headless Chrome (Selenium) ──▶ Google Meet Web Application        │   │
+│   └──────────────────────────────┬──────────────────────────────────────┘   │
+│                                  │                                          │
+│   ┌──────────────────────────────┴──────────────────────────────────────┐   │
+│   │                 PulseAudio Virtual Audio Routing                    │   │
+│   │   MeetOutput Sink  ──▶ FFmpeg Audio/Video Capture & AudioInput Stream │   │
+│   │   BotMic Sink      ◀── pacat PCM Playback Pipe                      │   │
+│   │   VirtualMic Src   ──▶ Chrome Input Microphone                      │   │
+│   └──────────────────────────────┬──────────────────────────────────────┘   │
+│                                  │ Sub-500ms Real-Time Pipeline             │
+│                                  ▼                                          │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │                Pipecat Voice AI Processing Loop                     │   │
+│   │  Silero VAD ──▶ Deepgram WebSocket STT ──▶ Groq LLM (Streaming)    │   │
+│   │              ──▶ Deepgram WebSocket TTS ──▶ Audio Output Pipe       │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Core Architecture Components
+
+1. **Headless Browser & Virtual Audio Stack**
+   - **Xvfb Display (`:99`)**: Runs headless Chrome inside Docker to join Google Meet calls without requiring a physical GUI.
+   - **PulseAudio Sinks**: Virtual sinks (`MeetOutput` for meeting audio capture, `BotMic` remapped to Chrome's virtual microphone) isolate bot audio from host hardware.
+
+2. **Real-Time Voice AI Pipeline (Sub-500ms TTFB)**
+   - **Streaming ASR**: Deepgram WebSocket API (`wss://api.deepgram.com/v1/listen`) for speech-to-text with minimal latency.
+   - **VAD & Echo Cancellation**: Silero Neural VAD paired with WebRTC Acoustic Echo Cancellation (AEC) prevents self-interruption.
+   - **Streaming LLM**: Groq API (`llama-3.3-70b-versatile` / `llama-3.1-8b-instant`) with sentence boundary parsing (`.`, `!`, `?`).
+   - **Streaming TTS**: Deepgram WebSocket Speak API (`wss://api.deepgram.com/v1/speak`) returning audio PCM frames in ~80ms.
+
+3. **Lifecycle & Session Management**
+   - **DOM MutationObserver**: Uses JavaScript `MutationObserver` to poll lightweight UI flags every 100ms, reducing Selenium CPU overhead by **~90%**.
+   - **Participant Count Auto-Shutdown**: Continuously monitors active participant video tiles and triggers container termination when human count $\le 1$, eliminating zombie containers and saving **2GB RAM per session**.
 
 ---
-
-## 🧠 Architecture & AI Pipeline
-
-The Bot Service features a low-latency real-time voice conversational architecture and autonomous meeting bot execution engine:
-
-### 1. 🤖 Headless Bot Agent Subsystem
-- **Virtual Audio & Display Stack**: Headless Chrome controlled via Selenium inside Docker, rendering to an Xvfb virtual frame buffer (`:99`).
-- **PulseAudio Virtual Sinks**: Routes meeting output to `MeetOutput` (captured via FFmpeg & `AudioInput`) and pipes synthesized bot voice to `BotMic` remapped as Chrome's microphone input (`VirtualMic`).
-- **DOM MutationObserver**: Uses JavaScript `MutationObserver` to poll lightweight mutation flags every 100ms, reducing Selenium CPU overhead by **~90%**.
-- **Participant Count Auto-Shutdown**: Continuously monitors active participant video tiles (`_monitor_participants()`). Triggers graceful container termination when human count $\le 1$, eliminating 100% of zombie container leaks and saving **2GB RAM per session**.
-
-### 2. ⚡ Real-Time Voice AI Pipeline (Sub-500ms Latency)
-- **Direct WebSocket STT**: Deepgram WebSocket ASR (`wss://api.deepgram.com/v1/listen`) with instant `speech_final: true` boundaries (100–150ms), replacing legacy DOM caption silence timeouts.
-- **Neural VAD & Echo Cancellation**: Silero Neural VAD / WebRTC VAD with hysteresis counters paired with WebRTC Acoustic Echo Cancellation (AEC) via PulseAudio `module-echo-cancel`.
-- **Token-Streaming LLM**: Groq API (`llama-3.1-8b-instant` / `llama-3.3-70b-versatile`) with sentence-boundary token parsing (`.`, `!`, `?`).
-- **WebSocket Streaming TTS**: Deepgram WebSocket Speak API (`wss://api.deepgram.com/v1/speak`) returning audio PCM frames within **~80ms** of sentence output.
-- **Pipecat Interruption Resilience**: Atomic `CancellationToken` pattern allowing immediate buffer flushing without killing the underlying asyncio event loop.
-- **Latency Gain**: Cuts end-to-end response latency from **~5.2s down to ~520ms P50** (~10x reduction).
-
-*For a detailed layer-by-layer architectural deep-dive, see [VOICE_BOT_ARCHITECTURE.md](../VOICE_BOT_ARCHITECTURE.md).*
 
 ### Environment Variables
 Ensure your `.env` file includes:
@@ -114,7 +139,7 @@ python app.py "https://meet.google.com/abc-defg-hij" --speak true
 
 ---
 
-##  Whale Docker Deployment (Production)
+## 🐳 Docker Deployment (Production)
 
 For production, the bot runs in a Docker container with a virtualized audio stack (PulseAudio). This eliminates the need for physical audio devices or Virtual Cables.
 
@@ -217,33 +242,6 @@ For version compatibility and migration steps, see [UPGRADE.md](./UPGRADE.md).
 ## 📜 Code of Conduct
 
 We follow a standard of respectful communication and collaboration. Please review our [Code of Conduct](./CODE_OF_CONDUCT.md) before contributing.
-
----
-
-## 📋 TODO
-
-### Completed ✅
-- [x] Docker audio pipeline with PulseAudio virtual sinks
-- [x] Audio self-test on container startup
-- [x] Real-time audio recording with FFmpeg
-- [x] VAD (Voice Activity Detection) for speech detection
-- [x] Deepgram ASR integration for transcription
-- [x] Groq LLM integration for conversation summarization
-- [x] Bot playback via `paplay` to virtual microphone
-- [x] POST request structure to TTS microservice (with full context)
-- [x] `force_tts` logic based on user intent detection
-
-### In Progress 🚧
-- [ ] Connect to actual TTS microservice (currently using dummy audio)
-- [ ] Fine-tune VAD threshold for low-volume audio
-- [ ] Add real audio response from microservice (uncomment code in `output.py`)
-
-### Planned 📝
-- [ ] WebSocket streaming for lower latency ASR
-- [ ] Multiple voice options for TTS
-- [ ] Meeting transcript export to S3
-- [ ] Health check endpoint for container orchestration
-- [ ] Kubernetes deployment manifests
 
 ---
 
